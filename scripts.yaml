@@ -1,0 +1,135 @@
+spoolman_force_scan_all_slots:
+  alias: "Spoolman: Scan & Alert"
+  description:
+    Scans slots. Strips quotes from DB tags to ensure matching. Stops on
+    missing.
+  sequence:
+    - response_variable: all_spools
+      action: rest_command.spoolman_find_spool
+    - repeat:
+        for_each:
+          - sensor.h2d_ams_1_tray_1
+          - sensor.h2d_ams_1_tray_2
+          - sensor.h2d_ams_1_tray_3
+          - sensor.h2d_ams_1_tray_4
+          - sensor.h2d_ams_2_tray_1
+          - sensor.h2d_ams_2_tray_2
+          - sensor.h2d_ams_2_tray_3
+          - sensor.h2d_ams_2_tray_4
+          - sensor.h2d_ams_3_tray_1
+        sequence:
+          - variables:
+              current_tag: "{{ state_attr(repeat.item, 'tag_uid') }}"
+              tray_name:
+                "{{ state_attr(repeat.item, 'friendly_name') | replace('H2D
+                ', '') }}"
+          - if:
+              - condition: template
+                value_template:
+                  "{{ current_tag not in ['None', None, '', '0000000000000000']
+                  }}"
+            then:
+              - variables:
+                  matched_spool_id:
+                    "{% set spools = all_spools['content'] %} {% set ns
+                    = namespace(found_id=0) %}\n{# A. Clean the Printer Tag #} {% set scan_tag
+                    = current_tag | string | trim | upper %}\n{% for spool in spools %}\n
+                    \ {% if spool.extra is defined and spool.extra.bambu_rfid_uid is defined
+                    %}\n    \n    {# B. Clean the DB Tag (Strip Quotes!) #}\n    {% set
+                    raw_db = spool.extra.bambu_rfid_uid | string %}\n    {% set db_tag =
+                    raw_db | replace('\"', '') | replace(\"'\", \"\") | trim | upper %}\n
+                    \   \n    {# C. Compare #}\n    {% if db_tag == scan_tag and scan_tag
+                    | length > 5 %}\n      {% set ns.found_id = spool.id %}\n    {% endif
+                    %}\n  {% endif %}\n{% endfor %}\n{{ ns.found_id }}\n"
+              - if:
+                  - condition: template
+                    value_template: "{{ matched_spool_id | int == 0 }}"
+                then:
+                  - target:
+                      entity_id: input_text.last_scanned_rfid
+                    data:
+                      value: "{{ current_tag }}"
+                    action: input_text.set_value
+                  - target:
+                      entity_id: input_text.last_scanned_name
+                    data:
+                      value:
+                        "{{ state_attr(repeat.item, 'name') }} ({{ state_attr(repeat.item,
+                        'type') }})"
+                    action: input_text.set_value
+                  - target:
+                      entity_id: input_text.last_scanned_color
+                    data:
+                      value:
+                        "{{ state_attr(repeat.item, 'color') | default('cccccc')
+                        }}"
+                    action: input_text.set_value
+                  - target:
+                      entity_id: input_text.last_scanned_remain
+                    data:
+                      value:
+                        "{% set r = state_attr(repeat.item, 'remain') | int(-1) %}
+                        {{ r ~ '%' if r >= 0 else 'Unknown' }}
+
+                        "
+                    action: input_text.set_value
+                  - data:
+                      title: Unregistered Spool
+                      message:
+                        Spool in {{ tray_name }}, ID {{ current_tag }}, missing from
+                        Spoolman.
+                      data:
+                        url: /dashboard-printer/intake
+                        clickAction: /dashboard-printer/intake
+                        group: spoolman-alerts
+                        actions:
+                          - action: URI
+                            title: Open Spoolman
+                            uri: "{{ states('input_text.spoolman_url') }}"
+                    action: notify.mobile_app_sm_s938b
+                  - stop: Stopping at first missing spool.
+spoolman_function_get_id_from_rfid:
+  alias: "Spoolman: Function - Get ID from RFID"
+  description: "Accepts an RFID tag, searches Spoolman (client-side), and returns the Spool ID."
+  fields:
+    tag_uid:
+      description: "The RFID tag to search for"
+      example: "EB5886FD..."
+      required: true
+
+  sequence:
+    # 1. Fetch ALL spools
+    - service: rest_command.spoolman_find_spool
+      response_variable: all_spools
+
+    # 2. Quote Stripping + Matching
+    - variables:
+        found_id: >
+          {% set spools = all_spools['content'] %}
+          {% set ns = namespace(id=0) %}
+
+          {# Sanitize Input #}
+          {% set scan_tag = tag_uid | string | trim | upper %}
+
+          {% for spool in spools %}
+            {% if spool.extra is defined and spool.extra.bambu_rfid_uid is defined %}
+              {# Sanitize DB Entry #}
+              {% set raw_db = spool.extra.bambu_rfid_uid | string %}
+              {% set db_tag = raw_db | replace('"', '') | replace("'", "") | trim | upper %}
+              
+              {# Match #}
+              {% if db_tag == scan_tag %}
+                {% set ns.id = spool.id %}
+              {% endif %}
+            {% endif %}
+          {% endfor %}
+
+          {{ ns.id }}
+
+    # 3. Return result to the caller
+    - stop: "Search Complete"
+      response_variable: output_data
+
+  variables:
+    output_data:
+      spool_id: "{{ found_id }}"

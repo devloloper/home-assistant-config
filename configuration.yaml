@@ -1,0 +1,30 @@
+# Loads default set of integrations. Do not remove.
+default_config:
+
+# Load frontend themes from the themes folder
+frontend:
+  themes: !include_dir_merge_named themes
+
+automation: !include automations.yaml
+script: !include scripts.yaml
+scene: !include scenes.yaml
+
+rest_command:
+  # 1. Fetch all active spools, need to filter somewhere else since searching on extra fields is not implemented
+  spoolman_find_spool:
+    url: "{{ states('input_text.spoolman_url') }}/api/v1/spool?archived=false"
+    method: GET
+    content_type: "application/json"
+
+  # 2. Deduct weight from a specific spool ID
+  spoolman_subtract:
+    url: "{{ states('input_text.spoolman_url') }}/api/v1/spool/{{ spool_id }}/use"
+    method: PUT
+    payload: '{"use_weight": {{ weight }}}'
+    content_type: "application/json"
+
+  # Find a spool by its physical location string
+  spoolman_find_by_location:
+    url: "{{ states('input_text.spoolman_url') }}/api/v1/spool?location={{ location }}"
+    method: GET
+    content_type: "application/json"
