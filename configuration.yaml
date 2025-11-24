@@ -28,3 +28,9 @@ rest_command:
     url: "{{ states('input_text.spoolman_url') }}/api/v1/spool?location={{ location }}"
     method: GET
     content_type: "application/json"
+
+  # Get spool details
+  spoolman_get_spool_info:
+    url: "{{ states('input_text.spoolman_url') }}/api/v1/spool/{{ spool_id }}"
+    method: GET
+    content_type: "application/json"

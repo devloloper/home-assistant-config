@@ -1,4 +1,4 @@
-spoolman_force_scan_all_slots:
+spoolman_scan_alert:
   alias: "Spoolman: Scan & Alert"
   description:
     Scans slots. Strips quotes from DB tags to ensure matching. Stops on
@@ -19,14 +19,14 @@ spoolman_force_scan_all_slots:
           - sensor.h2d_ams_3_tray_1
         sequence:
           - variables:
-              current_tag: "{{ state_attr(repeat.item, 'tag_uid') }}"
+              current_tag: "{{ state_attr(repeat.item, 'tray_uuid') }}"
               tray_name:
                 "{{ state_attr(repeat.item, 'friendly_name') | replace('H2D
                 ', '') }}"
           - if:
               - condition: template
                 value_template:
-                  "{{ current_tag not in ['None', None, '', '0000000000000000']
+                  "{{ current_tag not in ['None', None, '', '00000000000000000000000000000000']
                   }}"
             then:
               - variables:
@@ -90,46 +90,43 @@ spoolman_force_scan_all_slots:
                   - stop: Stopping at first missing spool.
 spoolman_function_get_id_from_rfid:
   alias: "Spoolman: Function - Get ID from RFID"
-  description: "Accepts an RFID tag, searches Spoolman (client-side), and returns the Spool ID."
+  description: Accepts an RFID tag, searches Spoolman, and returns the Spool ID.
   fields:
     tag_uid:
-      description: "The RFID tag to search for"
-      example: "EB5886FD..."
+      description: The RFID tag to search for
+      example: EB5886FD...
       required: true
-
   sequence:
-    # 1. Fetch ALL spools
-    - service: rest_command.spoolman_find_spool
+    - action: rest_command.spoolman_find_spool
       response_variable: all_spools
-
-    # 2. Quote Stripping + Matching
     - variables:
-        found_id: >
-          {% set spools = all_spools['content'] %}
-          {% set ns = namespace(id=0) %}
-
-          {# Sanitize Input #}
-          {% set scan_tag = tag_uid | string | trim | upper %}
-
-          {% for spool in spools %}
-            {% if spool.extra is defined and spool.extra.bambu_rfid_uid is defined %}
-              {# Sanitize DB Entry #}
-              {% set raw_db = spool.extra.bambu_rfid_uid | string %}
-              {% set db_tag = raw_db | replace('"', '') | replace("'", "") | trim | upper %}
-              
-              {# Match #}
-              {% if db_tag == scan_tag %}
-                {% set ns.id = spool.id %}
-              {% endif %}
-            {% endif %}
-          {% endfor %}
-
-          {{ ns.id }}
-
-    # 3. Return result to the caller
-    - stop: "Search Complete"
+        found_id:
+          "{% set spools = all_spools['content'] %} {% set ns = namespace(id=0)
+          %} {% set scan_tag = tag_uid | string | trim | upper %}\n{% for spool in spools
+          %}\n  {% if spool.extra is defined and spool.extra.bambu_rfid_uid is defined
+          %}\n    {% set raw_db = spool.extra.bambu_rfid_uid | string %}\n    {% set
+          db_tag = raw_db | replace('\"', '') | replace(\"'\", \"\") | trim | upper
+          %}\n    {% if db_tag == scan_tag %}\n      {% set ns.id = spool.id %}\n    {%
+          endif %}\n  {% endif %}\n{% endfor %} {{ ns.id }}\n"
+    - variables:
+        output_data:
+          spool_id: "{{ found_id }}"
+    - stop: Search Complete
       response_variable: output_data
+spoolman_debug:
+  alias: "Spoolman: Raw Dump"
+  sequence:
+    - action: rest_command.spoolman_get_spool_info
+      data:
+        spool_id: 5
+      response_variable: raw_data
+    - action: notify.persistent_notification
+      data:
+        title: Raw API Response
+        message: "Valid ID Used: 5
 
-  variables:
-    output_data:
-      spool_id: "{{ found_id }}"
+          Keys received: {{ raw_data.keys() | list }}
+
+          FULL DATA: {{ raw_data }}
+
+          "

@@ -1,213 +1,202 @@
-- id: "1763673822901"
-  alias: "Spoolman: Master Tracking (RFID + Location)"
-  description: "Tracks usage. Includes 'Final Flush' to capture remaining grams at end of print."
+- id: '1763673822901'
+  alias: 'Spoolman: Master Tracking (RFID + Location)'
+  description: Tracks usage. Includes 'Final Flush' to capture remaining grams at
+    end of print.
+  triggers:
+  - entity_id: sensor.h2d_print_progress
+    not_to:
+    - unknown
+    - unavailable
+    trigger: state
+  - entity_id: sensor.h2d_print_status
+    trigger: state
+  actions:
+  - if:
+    - condition: numeric_state
+      entity_id: sensor.h2d_print_progress
+      below: 1
+    - condition: template
+      value_template: '{{ print_state in [''prepare'', ''running''] }}'
+    then:
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.h2d_job_pointer
+      data:
+        value: 0
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.h2d_current_print_cost
+      data:
+        value: 0
+    - stop: Reset pointer and cost for new print.
+  - if:
+    - condition: or
+      conditions:
+      - condition: and
+        conditions:
+        - condition: state
+          entity_id: sensor.h2d_print_status
+          state: running
+        - condition: template
+          value_template: '{{ delta > 0.5 }}'
+      - condition: and
+        conditions:
+        - condition: state
+          entity_id: sensor.h2d_print_status
+          state: finish
+        - condition: template
+          value_template: '{{ delta > 0 }}'
+    then:
+    - variables:
+        found_spool_id: 0
+    - if:
+      - condition: template
+        value_template: '{{ lookup_type == ''RFID_TAG'' }}'
+      then:
+      - action: script.spoolman_function_get_id_from_rfid
+        data:
+          tag_uid: '{{ active_tray_attr }}'
+        response_variable: script_result
+      - variables:
+          found_spool_id: '{{ script_result.spool_id | default(0) }}'
+    - if:
+      - condition: template
+        value_template: '{{ lookup_type == ''LOCATION_MAP'' }}'
+      then:
+      - variables:
+          location_key: '{% set ams_num = (tray_id // 4) + 1 %} {% set slot_num =
+            (tray_id % 4) + 1 %} AMS {{ ams_num }} Slot {{ slot_num }}
+
+            '
+      - action: rest_command.spoolman_find_by_location
+        data:
+          location: '{{ location_key }}'
+        response_variable: loc_result
+      - variables:
+          found_spool_id: "{% if loc_result['content'] is defined and loc_result['content']
+            | length > 0 %}\n  {{ loc_result['content'][0]['id'] }}\n{% else %}\n
+            \ 0\n{% endif %}\n"
+    - if:
+      - condition: template
+        value_template: '{{ lookup_type == ''MANUAL_EXTERNAL'' }}'
+      then:
+      - variables:
+          found_spool_id: '{{ states(''input_select.h2d_external_spool'').split('':'')[0]
+            | int(0) }}'
+    - if:
+      - condition: template
+        value_template: '{{ found_spool_id | int(0) > 0 }}'
+      then:
+      - action: rest_command.spoolman_subtract
+        data:
+          spool_id: '{{ found_spool_id }}'
+          weight: '{{ delta }}'
+      - action: rest_command.spoolman_get_spool_info
+        data:
+          spool_id: '{{ found_spool_id }}'
+        response_variable: api_response
+      - variables:
+          spool_data: '{{ api_response.get(''content'', {}) }}'
+          fil_data: '{{ spool_data.get(''filament'', {}) }}'
+          s_price: '{% set p1 = spool_data.get(''price'') %} {% set p2 = fil_data.get(''price'')
+            %} {{ p1 if p1 is not none else p2 | default(0) }}
+
+            '
+          s_weight: '{{ spool_data.get(''initial_weight'', 1000) | float(1000) }}'
+          safe_weight: '{{ 1000 if s_weight == 0 else s_weight }}'
+          cost_chunk: '{{ (s_price | float(0) / safe_weight) * delta }}'
+          current_cost: '{{ states(''input_number.h2d_current_print_cost'') | float(0)
+            }}'
+      - action: input_number.set_value
+        target:
+          entity_id: input_number.h2d_current_print_cost
+        data:
+          value: '{{ (current_cost + cost_chunk) | round(4) }}'
+    - action: input_number.set_value
+      target:
+        entity_id: input_number.h2d_job_pointer
+      data:
+        value: '{{ consumed_so_far }}'
+    - delay:
+        seconds: 5
   mode: single
   max_exceeded: silent
-
-  triggers:
-    # Trigger on Progress (Drip Feed)
-    - entity_id: sensor.h2d_print_progress
-      not_to:
-        - unknown
-        - unavailable
-      trigger: state
-
-    # Trigger on Status (Catch the 'finish' event)
-    - entity_id: sensor.h2d_print_status
-      trigger: state
-
   variables:
-    # --- 1. MATH & POINTERS ---
-    prog: "{{ states('sensor.h2d_print_progress') | float(0) }}"
-    total_weight: "{{ states('sensor.h2d_print_weight') | float(0) }}"
-    consumed_so_far: "{{ (prog / 100.0) * total_weight }}"
-    pointer: "{{ states('input_number.h2d_job_pointer') | float(0) }}"
-    delta: "{{ (consumed_so_far - pointer) | round(2) }}"
-
-    # --- 2. RAW SENSOR DATA ---
-    active_tray_attr: "{{ state_attr('sensor.h2d_active_tray', 'tag_uid') }}"
-    tray_id: "{{ state_attr('sensor.h2d_active_tray', 'tray_id') | int(254) }}"
-    print_state: "{{ states('sensor.h2d_print_status') }}"
-
-    # --- 3. DETERMINE LOOKUP METHOD ---
-    lookup_type: >
-      {% if tray_id in [254, 255] %}
-        MANUAL_EXTERNAL
-      {% elif active_tray_attr not in ['0000000000000000', None, 'None'] %}
-        RFID_TAG
-      {% else %}
-        LOCATION_MAP
-      {% endif %}
-
-  actions:
-    # --- STEP 1: RESET POINTER (Start of New Print) ---
-    - if:
-        # Only reset if we are definitely at the start of a new job
-        - condition: numeric_state
-          entity_id: sensor.h2d_print_progress
-          below: 1
-        - condition: template
-          value_template: "{{ print_state in ['Prepare', 'Running'] }}"
-      then:
-        - action: input_number.set_value
-          target:
-            entity_id: input_number.h2d_job_pointer
-          data:
-            value: 0
-        - stop: "Reset pointer for new print."
-
-    # --- STEP 2: DEDUCTION LOGIC ---
-    - if:
-        - condition: or
-          conditions:
-            # Scenario A: Mid-Print Drip Feed (Throttled > 0.5g)
-            - condition: and
-              conditions:
-                - condition: state
-                  entity_id: sensor.h2d_print_status
-                  state: "Running"
-                - condition: template
-                  value_template: "{{ delta > 0.5 }}"
-
-            # Scenario B: End-of-Print Flush (Catch ANY remaining amount)
-            - condition: and
-              conditions:
-                - condition: state
-                  entity_id: sensor.h2d_print_status
-                  state: "Finish"
-                - condition: template
-                  value_template: "{{ delta > 0 }}"
-      then:
-        # Initialize ID to 0
-        - variables:
-            found_spool_id: 0
-
-        # PATH A: RFID (Use the Function Script)
-        - if:
-            - condition: template
-              value_template: "{{ lookup_type == 'RFID_TAG' }}"
-          then:
-            - action: script.spoolman_function_get_id_from_rfid
-              data:
-                tag_uid: "{{ active_tray_attr }}"
-              response_variable: script_result
-            - variables:
-                found_spool_id: "{{ script_result.spool_id | default(0) }}"
-
-        # PATH B: LOCATION (Generic AMS Spools)
-        - if:
-            - condition: template
-              value_template: "{{ lookup_type == 'LOCATION_MAP' }}"
-          then:
-            - variables:
-                location_key: >
-                  {% set ams_num = (tray_id // 4) + 1 %}
-                  {% set slot_num = (tray_id % 4) + 1 %}
-                  AMS {{ ams_num }} Slot {{ slot_num }}
-            - action: rest_command.spoolman_find_by_location
-              data:
-                location: "{{ location_key }}"
-              response_variable: loc_result
-            - variables:
-                found_spool_id: >
-                  {% if loc_result['content'] is defined and loc_result['content'] | length > 0 %}
-                    {{ loc_result['content'][0]['id'] }}
-                  {% else %}
-                    0
-                  {% endif %}
-
-        # PATH C: MANUAL EXTERNAL
-        - if:
-            - condition: template
-              value_template: "{{ lookup_type == 'MANUAL_EXTERNAL' }}"
-          then:
-            - variables:
-                found_spool_id: "{{ states('input_select.h2d_external_spool').split(':')[0] | int(0) }}"
-
-        # --- STEP 3: EXECUTE SUBTRACTION ---
-        - if:
-            - condition: template
-              value_template: "{{ found_spool_id | int(0) > 0 }}"
-          then:
-            - action: rest_command.spoolman_subtract
-              data:
-                spool_id: "{{ found_spool_id }}"
-                weight: "{{ delta }}"
-
-        # --- STEP 4: UPDATE POINTER & COOL DOWN ---
-        - action: input_number.set_value
-          target:
-            entity_id: input_number.h2d_job_pointer
-          data:
-            value: "{{ consumed_so_far }}"
-
-        # Delay to prevent spamming
-        - delay:
-            seconds: 5
-- id: "1763840855264"
-  alias: "Spoolman: New Tag Alert (On Load)"
-  description:
-    Checks Spoolman immediately when a new RFID tag is inserted into any
+    prog: '{{ states(''sensor.h2d_print_progress'') | float(0) }}'
+    total_weight: '{{ states(''sensor.h2d_print_weight'') | float(0) }}'
+    consumed_so_far: '{{ (prog / 100.0) * total_weight }}'
+    pointer: '{{ states(''input_number.h2d_job_pointer'') | float(0) }}'
+    delta: '{{ (consumed_so_far - pointer) | round(2) }}'
+    active_tray_attr: '{{ state_attr(''sensor.h2d_active_tray'', ''tray_uuid'') }}'
+    raw_ams_idx: '{{ state_attr(''sensor.h2d_active_tray'', ''ams_index'') | int(-1)
+      }}'
+    raw_tray_idx: '{{ state_attr(''sensor.h2d_active_tray'', ''tray_index'') | int(-1)
+      }}'
+    tray_id: "{% if raw_ams_idx >= 0 and raw_tray_idx >= 0 %}\n  {{ (raw_ams_idx *
+      4) + raw_tray_idx }}\n{% else %}\n  254\n{% endif %}\n"
+    print_state: '{{ states(''sensor.h2d_print_status'') }}'
+    lookup_type: "{% if tray_id in [254, 255] %}\n  MANUAL_EXTERNAL\n{% elif active_tray_attr
+      not in ['00000000000000000000000000000000', None, 'None'] %}\n  RFID_TAG\n{%
+      else %}\n  LOCATION_MAP\n{% endif %}\n"
+- id: '1763840855264'
+  alias: 'Spoolman: New Tag Alert (On Load)'
+  description: Checks Spoolman immediately when a new RFID tag is inserted into any
     AMS slot.
   triggers:
-    - entity_id:
-        - sensor.h2d_ams_1_tray_1
-        - sensor.h2d_ams_1_tray_2
-        - sensor.h2d_ams_1_tray_3
-        - sensor.h2d_ams_1_tray_4
-        - sensor.h2d_ams_2_tray_1
-        - sensor.h2d_ams_2_tray_2
-        - sensor.h2d_ams_2_tray_3
-        - sensor.h2d_ams_2_tray_4
-        - sensor.h2d_ams_3_tray_1
-      attribute: tag_uid
-      trigger: state
+  - entity_id:
+    - sensor.h2d_ams_1_tray_1
+    - sensor.h2d_ams_1_tray_2
+    - sensor.h2d_ams_1_tray_3
+    - sensor.h2d_ams_1_tray_4
+    - sensor.h2d_ams_2_tray_1
+    - sensor.h2d_ams_2_tray_2
+    - sensor.h2d_ams_2_tray_3
+    - sensor.h2d_ams_2_tray_4
+    - sensor.h2d_ams_3_tray_1
+    attribute: tray_uuid
+    trigger: state
   conditions:
-    - alias: "Safety Check: Ignore Empty or Ghost Tags"
-      condition: template
-      value_template: "{{ new_tag not in ['None', None, '', '0000000000000000']
-        }}
+  - alias: 'Safety Check: Ignore Empty or Ghost Tags'
+    condition: template
+    value_template: '{{ new_tag not in [''None'', None, '''', ''00000000000000000000000000000000'']
+      }}
 
-        "
-    - alias: Only check new tags
-      condition: template
-      value_template:
-        "{{ trigger.to_state.attributes.tag_uid != trigger.from_state.attributes.tag_uid
-        }}
+      '
+  - alias: Only check new tags
+    condition: template
+    value_template: '{{ trigger.to_state.attributes.tray_uuid != trigger.from_state.attributes.tray_uuid
+      }}
 
-        "
+      '
   actions:
-    - action: script.spoolman_function_get_id_from_rfid
+  - action: script.spoolman_function_get_id_from_rfid
+    data:
+      tray_uuid: '{{ new_tag }}'
+    response_variable: lookup_result
+  - if:
+    - condition: template
+      value_template: '{{ lookup_result.spool_id | int == 0 }}'
+    then:
+    - target:
+        entity_id: input_text.last_scanned_rfid
       data:
-        tag_uid: "{{ new_tag }}"
-      response_variable: lookup_result
-
-    # If NOT found, Notify
-    - if:
-        - condition: template
-          value_template: "{{ lookup_result.spool_id | int == 0 }}"
-      then:
-        - target:
-            entity_id: input_text.last_scanned_rfid
-          data:
-            value: "{{ new_tag }}"
-          action: input_text.set_value
-        - data:
-            title: "\U0001F195 Unknown Spool Loaded"
-            message:
-              "Tray {{ trigger.to_state.attributes.tray_id }} has new tag: {{ new_tag
-              }}
+        value: '{{ new_tag }}'
+      action: input_text.set_value
+    - data:
+        title: "\U0001F195 Unknown Spool Loaded"
+        message: 'Tray {{ trigger.to_state.attributes.tray_id }} has new tag: {{ new_tag
+          }}
 
 
-              Tap to add to Spoolman."
-            data:
-              url: /dashboard-printer/intake
-              clickAction: /dashboard-printer/intake
-              actions:
-                - action: URI
-                  title: Open Spoolman
-                  uri: "{{ states('input_text.spoolman_url') }}"
-          action: notify.mobile_app_sm_s938b
+          Tap to add to Spoolman.'
+        data:
+          url: /dashboard-printer/intake
+          clickAction: /dashboard-printer/intake
+          actions:
+          - action: URI
+            title: Open Spoolman
+            uri: '{{ states(''input_text.spoolman_url'') }}'
+      action: notify.mobile_app_sm_s938b
   mode: single
   variables:
-    new_tag: "{{ trigger.to_state.attributes.tag_uid }}"
+    new_tag: '{{ trigger.to_state.attributes.tray_uuid }}'
